@@ -7,7 +7,7 @@
 - Answers get-name / get-colour / get-level / get-mute requests.
 - Forwards changes from one client to all *other* connected clients.
 - Plain TCP only (no TLS / authentication).
-- --simulate moves a random input fader every 2 s so you can watch incoming updates.
+- --simulate sends a fader, mute, scene recall or MIDI Strip message every second.
 
 It implements the same byte formats as Sources/DLiveMIDI/DLiveProtocol.swift. It is a test
 double for the app, not a reference for the real console's behaviour.
@@ -207,14 +207,37 @@ def process(m, mixer, st, conn):
 
 
 def simulate(mixer):
+    """Cycle through typical traffic: fader, mute, scene recall, MIDI Strip fader/key."""
+    N = mixer.N
+    i = 0
     while True:
-        time.sleep(2)
-        ch = random.randrange(0, 16)
-        v = random.randrange(0, 128)
+        time.sleep(1)
+        step = i % 5
+        ch = (i // 5) % 8
+        if step == 0:
+            v = random.randrange(0, 128)
+            msg = nrpn(N, ch, 0x17, v)
+            mixer.level[(N, ch)] = v
+            label = f"input {ch + 1} fader -> {v:#04x}"
+        elif step == 1:
+            on = not mixer.mute.get((N, ch), False)
+            mixer.mute[(N, ch)] = on
+            msg = bytes([0x90 | N, ch, 0x7F if on else 0x3F, 0x90 | N, ch, 0])
+            label = f"input {ch + 1} mute {'on' if on else 'off'}"
+        elif step == 2:
+            scene = i // 5 % 20
+            msg = bytes([0xB0 | N, 0x00, 0x00, 0xC0 | N, scene])
+            label = f"scene {scene + 1} recalled"
+        elif step == 3:
+            msg = bytes([0xB1, ch, random.randrange(0, 128)])
+            label = f"MIDI strip {ch + 1} fader"
+        else:
+            msg = bytes([0x91, ch, 0x7F, 0x91, ch, 0x00])
+            label = f"MIDI strip {ch + 1} mute key"
         with mixer.lock:
-            mixer.level[(mixer.N, ch)] = v
-            mixer.broadcast(nrpn(mixer.N, ch, 0x17, v))
-        print(f"  sim: input {ch + 1} level -> {v:#04x}")
+            mixer.broadcast(msg)
+        print(f"  sim: {label}: {msg.hex(' ').upper()}", flush=True)
+        i += 1
 
 
 def main():
@@ -234,7 +257,7 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", args.port))
     srv.listen()
-    print(f"mock dLive listening on :{args.port}, MIDI channels {args.base}-{args.base + 4}")
+    print(f"mock dLive listening on :{args.port}, MIDI channels {args.base}-{args.base + 4}", flush=True)
     if args.simulate:
         threading.Thread(target=simulate, args=(mixer,), daemon=True).start()
     while True:

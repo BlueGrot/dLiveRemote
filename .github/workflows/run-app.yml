@@ -1,0 +1,59 @@
+name: Run app (end-to-end)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['Sources/**', 'Tools/**', '.github/workflows/run-app.yml']
+
+jobs:
+  run:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app
+        run: ./Scripts/make-app.sh
+
+      - name: Start mock dLive (MixRack port 51325)
+        run: |
+          python3 Tools/mock_dlive.py --port 51325 --base 12 --simulate > mock.log 2>&1 &
+          sleep 2
+          cat mock.log
+
+      - name: Configure and launch app
+        run: |
+          defaults write local.dliveremote host 127.0.0.1
+          defaults write local.dliveremote target mixRack
+          defaults write local.dliveremote baseChannel -int 12
+          defaults write local.dliveremote autoConnectOnLaunch -bool true
+          defaults write local.dliveremote notifyOnConnectionChange -bool false
+          build/DLiveRemote.app/Contents/MacOS/DLiveRemote > app.log 2>&1 &
+          sleep 8
+
+      - name: Listen on the "dLive" virtual MIDI port
+        run: swift Tools/midi_listen.swift dLive 12 | tee listen.log
+
+      - name: Screenshots
+        if: always()
+        run: |
+          mkdir -p shots
+          osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "DLiveRemote") to true' || true
+          sleep 1
+          screencapture -x shots/1-main-window.png || true
+          osascript -e 'tell application "System Events" to keystroke "," using command down' || true
+          sleep 2
+          screencapture -x shots/2-settings.png || true
+
+      - name: Collect logs
+        if: always()
+        run: |
+          cp mock.log app.log listen.log shots/ 2>/dev/null || true
+          echo "--- mock ---"; tail -20 mock.log
+          echo "--- app ---"; tail -20 app.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-results
+          path: shots/
