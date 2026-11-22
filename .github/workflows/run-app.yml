@@ -32,7 +32,10 @@ jobs:
           sleep 8
 
       - name: Listen on the "dLive" virtual MIDI port
-        run: swift Tools/midi_listen.swift dLive 12 | tee listen.log
+        run: |
+          set -o pipefail
+          defaults read local.dliveremote || true
+          swift Tools/midi_listen.swift dLive 12 | tee listen.log
 
       - name: Screenshots
         if: always()
@@ -44,13 +47,19 @@ jobs:
           osascript -e 'tell application "System Events" to keystroke "," using command down' || true
           sleep 2
           screencapture -x shots/2-settings.png || true
+          # Print small JPEGs as base64 so they can be read from the job log.
+          for f in shots/*.png; do
+            sips -Z 900 -s format jpeg -s formatOptions 60 "$f" --out "${f%.png}.jpg" >/dev/null 2>&1 || continue
+            echo "BEGIN-B64 $(basename "${f%.png}.jpg")"; base64 -b 0 -i "${f%.png}.jpg"; echo; echo "END-B64"
+          done
 
       - name: Collect logs
         if: always()
         run: |
           cp mock.log app.log listen.log shots/ 2>/dev/null || true
-          echo "--- mock ---"; tail -20 mock.log
-          echo "--- app ---"; tail -20 app.log
+          echo "--- mock ---"; head -5 mock.log; grep -E "client" mock.log || echo "(no client connected)"
+          echo "--- app ---"; cat app.log
+          echo "--- processes ---"; pgrep -fl DLiveRemote || echo "app not running"
 
       - uses: actions/upload-artifact@v4
         if: always()

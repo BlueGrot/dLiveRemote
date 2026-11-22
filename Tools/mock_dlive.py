@@ -103,7 +103,7 @@ def nrpn(midi, ch, param, value):
 
 
 def handle(conn, addr, mixer: Mixer):
-    print(f"client connected: {addr}")
+    print(f"client connected: {addr}", flush=True)
     parser = Parser()
     nrpn_state = {}
     try:
@@ -124,7 +124,7 @@ def handle(conn, addr, mixer: Mixer):
             if conn in mixer.clients:
                 mixer.clients.remove(conn)
         conn.close()
-        print(f"client disconnected: {addr}")
+        print(f"client disconnected: {addr}", flush=True)
 
 
 def process(m, mixer, st, conn):

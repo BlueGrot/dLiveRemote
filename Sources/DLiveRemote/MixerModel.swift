@@ -212,6 +212,8 @@ final class MixerModel: ObservableObject {
             MainActor.assumeIsolated { self?.tick() }
         }
         if notifyOnConnectionChange || silenceAlertMinutes > 0 { Notifier.requestAuthorization() }
+        NSLog("dLive Remote: launch, host=%@ target=%@ tls=%d autoConnect=%d base=%d",
+              host, target.rawValue, useTLS ? 1 : 0, autoConnectOnLaunch ? 1 : 0, baseChannel)
         if autoConnectOnLaunch && !host.isEmpty && !(useTLS && password.isEmpty) {
             DispatchQueue.main.async { [weak self] in self?.connect() }
         }
@@ -242,6 +244,7 @@ final class MixerModel: ObservableObject {
     }
 
     private func connectionStateChanged(_ s: DLiveConnection.State) {
+        NSLog("dLive Remote: connection state %@", String(describing: s))
         connectionState = s
         switch s {
         case .connected:
@@ -304,6 +307,7 @@ final class MixerModel: ObservableObject {
     }
 
     private func openConnection() {
+        NSLog("dLive Remote: connecting to %@:%d", host, Int(port))
         reconnectWork?.cancel()
         engine.reset()
         parser = MIDIStreamParser()
