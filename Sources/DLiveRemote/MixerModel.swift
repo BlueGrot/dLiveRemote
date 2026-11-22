@@ -70,7 +70,32 @@ final class MixerModel: ObservableObject {
         }
     }
 
+    /// Request names/levels/mutes after connecting. Off by default: the replies would
+    /// also be forwarded to Mac apps listening on the virtual MIDI port.
+    @Published var refreshOnConnect: Bool = UserDefaults.standard.bool(forKey: "refreshOnConnect") {
+        didSet { UserDefaults.standard.set(refreshOnConnect, forKey: "refreshOnConnect") }
+    }
+    @Published var autoReconnect: Bool = (UserDefaults.standard.object(forKey: "autoReconnect") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(autoReconnect, forKey: "autoReconnect") }
+    }
+    /// Forward everything received from the mixer to the virtual CoreMIDI source.
+    @Published var forwardToMac: Bool = (UserDefaults.standard.object(forKey: "forwardToMac") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(forwardToMac, forKey: "forwardToMac") }
+    }
+    /// Pass messages from Mac apps (virtual destination) to the mixer.
+    @Published var forwardFromMac: Bool = (UserDefaults.standard.object(forKey: "forwardFromMac") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(forwardFromMac, forKey: "forwardFromMac") }
+    }
+
     var port: UInt16 { target.port(tls: useTLS) }
+
+    // MARK: Mac MIDI bridge
+
+    static let midiPortName = "dLive"
+    let bridge = CoreMIDIBridge(name: MixerModel.midiPortName)
+    @Published private(set) var forwardedToMac = 0
+    @Published private(set) var receivedFromMac = 0
+    @Published private(set) var lastRxTime: Date?
 
     // MARK: Mixer state
 
@@ -86,6 +111,9 @@ final class MixerModel: ObservableObject {
     private var parser = MIDIStreamParser()
     private var decoder: DLiveDecoder
     private let maxLog = 2000
+    private var wantsConnection = false
+    private var reconnectWork: DispatchWorkItem?
+    private var activity: NSObjectProtocol?
 
     var baseByte: UInt8 { UInt8(max(1, min(12, baseChannel)) - 1) }
     var isConnected: Bool { connectionState == .connected }
@@ -94,18 +122,62 @@ final class MixerModel: ObservableObject {
         decoder = DLiveDecoder(base: 0)
         decoder.base = baseByte
         connection.onStateChange = { [weak self] s in
-            guard let self else { return }
-            self.connectionState = s
-            if s == .connected { self.refresh(self.page) }
+            self?.connectionStateChanged(s)
         }
         connection.onBytes = { [weak self] bytes in
             self?.receive(bytes)
         }
+        bridge.onMessageFromApps = { [weak self] bytes in
+            self?.fromMacApp(bytes)
+        }
+    }
+
+    private func connectionStateChanged(_ s: DLiveConnection.State) {
+        connectionState = s
+        switch s {
+        case .connected:
+            // Keep macOS from App-Napping the bridge while the window is hidden.
+            if activity == nil {
+                activity = ProcessInfo.processInfo.beginActivity(
+                    options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                    reason: "Bridging dLive MIDI")
+            }
+            if refreshOnConnect { refresh(page) }
+        case .failed:
+            endActivity()
+            scheduleReconnect()
+        case .disconnected:
+            endActivity()
+        default:
+            break
+        }
+    }
+
+    private func endActivity() {
+        if let a = activity { ProcessInfo.processInfo.endActivity(a) }
+        activity = nil
+    }
+
+    private func scheduleReconnect() {
+        guard wantsConnection, autoReconnect else { return }
+        reconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.wantsConnection, !self.connectionState.isActive else { return }
+            self.openConnection()
+        }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
     }
 
     // MARK: Connection
 
     func connect() {
+        wantsConnection = true
+        openConnection()
+    }
+
+    private func openConnection() {
+        reconnectWork?.cancel()
         parser = MIDIStreamParser()
         decoder = DLiveDecoder(base: baseByte)
         let creds = useTLS
@@ -115,7 +187,16 @@ final class MixerModel: ObservableObject {
                            useTLS: useTLS, credentials: creds)
     }
 
-    func disconnect() { connection.disconnect() }
+    func disconnect() {
+        wantsConnection = false
+        reconnectWork?.cancel()
+        connection.disconnect()
+    }
+
+    var isReconnecting: Bool {
+        if case .failed = connectionState { return wantsConnection && autoReconnect }
+        return false
+    }
 
     // MARK: State access
 
@@ -191,7 +272,12 @@ final class MixerModel: ObservableObject {
     // MARK: Receiving
 
     private func receive(_ bytes: [UInt8]) {
+        lastRxTime = Date()
         for msg in parser.feed(bytes) {
+            if forwardToMac {
+                bridge.publish(msg)
+                forwardedToMac += 1
+            }
             if case .system = msg { continue }
             let event = decoder.decode(msg)
             appendLog(.rx, msg.bytes, event?.description ?? "(NRPN part / note-off)", partial: event == nil)
@@ -215,6 +301,13 @@ final class MixerModel: ObservableObject {
             lastRecall = target == .mixRack ? "Scene \(i + 1)" : "Cue \(i)"
         default: break
         }
+    }
+
+    private func fromMacApp(_ bytes: [UInt8]) {
+        receivedFromMac += 1
+        guard forwardFromMac else { return }
+        connection.send(bytes)
+        appendLog(.tx, bytes, "from Mac app")
     }
 
     // MARK: Log

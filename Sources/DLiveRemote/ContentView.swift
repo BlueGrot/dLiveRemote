@@ -12,6 +12,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             ConnectionBar()
             Divider()
+            BridgeBar()
+            Divider()
             NavigationSplitView {
                 List(selection: pageSelection) {
                     Section("Channels") {
@@ -40,7 +42,6 @@ struct ContentView: View {
                 }
             }
         }
-        .onChange(of: model.page) { p in model.refresh(p) }
     }
 }
 
@@ -110,7 +111,49 @@ struct ConnectionBar: View {
         case .connecting: return "Connecting…"
         case .authenticating: return "Authenticating…"
         case .disconnected: return "Disconnected"
-        case .failed(let msg): return msg
+        case .failed(let msg): return model.isReconnecting ? "\(msg) — retrying…" : msg
+        }
+    }
+}
+
+// MARK: - Mac MIDI bridge bar
+
+struct BridgeBar: View {
+    @EnvironmentObject var model: MixerModel
+    @State private var flash = false
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "pianokeys")
+            Toggle("Mixer → Mac", isOn: $model.forwardToMac)
+                .help("Forward all MIDI from the mixer to the virtual MIDI source \"\(MixerModel.midiPortName)\"")
+            Toggle("Mac → Mixer", isOn: $model.forwardFromMac)
+                .help("Send MIDI from other apps on the virtual destination \"\(MixerModel.midiPortName) In\" to the mixer")
+            Text("Ports: \"\(MixerModel.midiPortName)\" (in your apps' MIDI inputs) · \"\(MixerModel.midiPortName) In\" (outputs)")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            if let err = model.bridge.setupError {
+                Text(err).foregroundStyle(.red)
+            }
+            Spacer()
+            Circle()
+                .fill(flash ? Color.green : Color.secondary.opacity(0.3))
+                .frame(width: 8, height: 8)
+                .help("Lights when MIDI arrives from the mixer")
+            Text("→Mac \(model.forwardedToMac)  ←Mac \(model.receivedFromMac)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            Toggle("Auto-reconnect", isOn: $model.autoReconnect)
+            Toggle("Request state on connect", isOn: $model.refreshOnConnect)
+                .help("Ask the mixer for all names/levels/mutes after connecting. The replies are also forwarded to Mac apps.")
+        }
+        .toggleStyle(.checkbox)
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .onChange(of: model.lastRxTime) { _ in
+            flash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { flash = false }
         }
     }
 }
