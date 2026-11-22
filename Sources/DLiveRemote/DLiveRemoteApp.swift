@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hideDock = UserDefaults.standard.bool(forKey: "hideDockIcon")
         NSApp.setActivationPolicy(hideDock ? .accessory : .regular)
         if !hideDock { NSApp.activate(ignoringOtherApps: true) }
+        MainActor.assumeIsolated { MixerModel.shared.didFinishLaunching() }
     }
 
     /// Keep bridging MIDI when the window is closed; quit with ⌘Q or from the menu bar.
@@ -17,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct DLiveRemoteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = MixerModel()
+    @ObservedObject private var model = MixerModel.shared
 
     var body: some Scene {
         WindowGroup("dLive Remote", id: "main") {

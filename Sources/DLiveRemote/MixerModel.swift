@@ -212,10 +212,17 @@ final class MixerModel: ObservableObject {
             MainActor.assumeIsolated { self?.tick() }
         }
         if notifyOnConnectionChange || silenceAlertMinutes > 0 { Notifier.requestAuthorization() }
-        NSLog("dLive Remote: launch, host=%@ target=%@ tls=%d autoConnect=%d base=%d",
+    }
+
+    /// The one model for the whole app (window, menu bar and Settings share it).
+    static let shared = MixerModel()
+
+    /// Called once from applicationDidFinishLaunching.
+    func didFinishLaunching() {
+        NSLog("dLive Remote: launched, host=%@ target=%@ tls=%d autoConnect=%d base=%d",
               host, target.rawValue, useTLS ? 1 : 0, autoConnectOnLaunch ? 1 : 0, baseChannel)
-        if autoConnectOnLaunch && !host.isEmpty && !(useTLS && password.isEmpty) {
-            DispatchQueue.main.async { [weak self] in self?.connect() }
+        if autoConnectOnLaunch && !host.isEmpty && !(useTLS && password.isEmpty) && !connectionState.isActive {
+            connect()
         }
     }
 
