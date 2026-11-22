@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Minimal mock of a dLive MixRack's MIDI-over-TCP interface, for testing without hardware.
 
-    python3 Tools/mock_dlive.py [--port 51328] [--base 12] [--simulate]
+    python3 Tools/mock_dlive.py [--port 51325] [--base 12] [--simulate]
 
 - Keeps mute / level / name / colour state for every address.
 - Answers get-name / get-colour / get-level / get-mute requests.
 - Forwards changes from one client to all *other* connected clients.
+- Plain TCP only (no TLS / authentication).
 - --simulate moves a random input fader every 2 s so you can watch incoming updates.
 
 It implements the same byte formats as Sources/DLiveMIDI/DLiveProtocol.swift. It is a test
@@ -77,6 +78,10 @@ class Mixer:
         self.N = base - 1
         self.lock = threading.Lock()
         self.level = {}   # (midi_ch, ch) -> value
+        self.nrpn = {}    # (midi_ch, ch, param) -> value  (main assign, HPF, PEQ...)
+        self.gain = {}    # mp -> value
+        self.pad = {}
+        self.phantom = {}
         self.mute = {}
         self.name = {}
         self.colour = {}
@@ -142,6 +147,8 @@ def process(m, mixer, st, conn):
                 ch, param = st.get((midi, "msb")), st.get((midi, "lsb"))
                 if ch is not None and param == 0x17:
                     mixer.level[(midi, ch)] = v
+                elif ch is not None:
+                    mixer.nrpn[(midi, ch, param)] = v
                 if ch is not None:
                     mixer.broadcast(nrpn(midi, ch, param, v), exclude=conn)
             elif cc == 0x00:
@@ -151,6 +158,9 @@ def process(m, mixer, st, conn):
             scene = st.get((midi, "bank"), 0) * 128 + m[1] + 1
             print(f"  scene {scene} recalled")
             mixer.broadcast(bytes([0xB0 | midi, 0x00, st.get((midi, 'bank'), 0), s, m[1]]), exclude=conn)
+        elif s & 0xF0 == 0xE0 and len(m) == 3:  # preamp gain (pitchbend on N)
+            mixer.gain[m[1]] = m[2]
+            mixer.broadcast(m, exclude=conn)
         elif m.startswith(HDR):
             body = m[len(HDR):-1]
             if len(body) < 3:
@@ -169,14 +179,29 @@ def process(m, mixer, st, conn):
             elif fn == 0x04:  # get colour
                 ch = body[2]
                 return HDR + bytes([midi, 0x05, ch, mixer.colour.get((midi, ch), 0)]) + b"\xF7"
-            elif fn == 0x05 and len(body) == 5 and body[2] == 0x0B:  # get level
-                ch = body[4]
-                return nrpn(midi, ch, 0x17, mixer.level.get((midi, ch), 0))
+            elif fn == 0x05 and len(body) == 5 and body[2] == 0x0B:  # get NRPN param
+                param, ch = body[3], body[4]
+                if param == 0x17:
+                    return nrpn(midi, ch, 0x17, mixer.level.get((midi, ch), 0))
+                if param == 0x19:  # preamp gain -> pitchbend reply
+                    return bytes([0xE0 | midi, ch, mixer.gain.get(ch, 0)])
+                default = 0x7F if param == 0x18 else 0
+                return nrpn(midi, ch, param, mixer.nrpn.get((midi, ch, param), default))
+            elif fn == 0x09 and len(body) == 4:  # set pad
+                mixer.pad[body[2]] = body[3] >= 0x40
+                mixer.broadcast(m, exclude=conn)
+            elif fn == 0x07:  # get pad
+                return HDR + bytes([midi, 0x08, body[2], 0x7F if mixer.pad.get(body[2]) else 0]) + b"\xF7"
+            elif fn == 0x0C and len(body) == 4:  # set 48V
+                mixer.phantom[body[2]] = body[3] >= 0x40
+                mixer.broadcast(m, exclude=conn)
+            elif fn == 0x0A:  # get 48V
+                return HDR + bytes([midi, 0x0B, body[2], 0x7F if mixer.phantom.get(body[2]) else 0]) + b"\xF7"
             elif fn == 0x05 and len(body) == 4 and body[2] == 0x09:  # get mute
                 ch = body[3]
                 vel = 0x7F if mixer.mute.get((midi, ch)) else 0x3F
                 return bytes([0x90 | midi, ch, vel, 0x90 | midi, ch, 0])
-            elif fn == 0x0D:
+            elif fn in (0x0D, 0x0E) and len(body) == 6:
                 mixer.broadcast(m, exclude=conn)
     return None
 
@@ -194,7 +219,7 @@ def simulate(mixer):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=51328)
+    ap.add_argument("--port", type=int, default=51325, help="51325 = MixRack, 51328 = Surface (plain TCP)")
     ap.add_argument("--base", type=int, default=12, help="base MIDI channel N (1-12)")
     ap.add_argument("--simulate", action="store_true")
     args = ap.parse_args()

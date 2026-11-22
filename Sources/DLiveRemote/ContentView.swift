@@ -4,8 +4,8 @@ import DLiveMIDI
 struct ContentView: View {
     @EnvironmentObject var model: MixerModel
 
-    private var kindSelection: Binding<ChannelKind?> {
-        Binding(get: { model.selectedKind }, set: { if let k = $0 { model.selectedKind = k } })
+    private var pageSelection: Binding<Page?> {
+        Binding(get: { model.page }, set: { if let p = $0 { model.page = p } })
     }
 
     var body: some View {
@@ -13,16 +13,26 @@ struct ContentView: View {
             ConnectionBar()
             Divider()
             NavigationSplitView {
-                List(ChannelKind.allCases, selection: kindSelection) { kind in
-                    Text(kind.displayName).tag(kind)
+                List(selection: pageSelection) {
+                    Section("Channels") {
+                        ForEach(ChannelKind.allCases) { kind in
+                            Text(kind.displayName).tag(Page.channels(kind))
+                        }
+                    }
+                    Section("MixRack") {
+                        Text("Preamps").tag(Page.preamps)
+                    }
                 }
                 .navigationSplitViewColumnWidth(min: 150, ideal: 170)
             } detail: {
                 VSplitView {
                     VStack(spacing: 0) {
-                        StripToolbar()
+                        PageToolbar()
                         Divider()
-                        StripsView(kind: model.selectedKind)
+                        switch model.page {
+                        case .channels(let kind): StripsView(kind: kind)
+                        case .preamps: PreampsView()
+                        }
                     }
                     .frame(minHeight: 340)
                     MonitorView()
@@ -30,6 +40,7 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: model.page) { p in model.refresh(p) }
     }
 }
 
@@ -40,27 +51,9 @@ struct ConnectionBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            statusDot
-            TextField("MixRack / Surface IP", text: $model.host)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 170)
-                .disabled(model.connectionState.isActive)
-            TextField("Port", value: $model.port, format: .number.grouping(.never))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .disabled(model.connectionState.isActive)
-            Toggle("TLS", isOn: $model.useTLS)
-                .disabled(model.connectionState.isActive)
-                .onChange(of: model.useTLS) { tls in
-                    if model.port == Int(DLive.tcpPort) || model.port == Int(DLive.tlsPort) {
-                        model.port = Int(tls ? DLive.tlsPort : DLive.tcpPort)
-                    }
-                }
-            Stepper("MIDI ch \(model.baseChannel)–\(model.baseChannel + 4)",
-                    value: $model.baseChannel, in: 1...12)
-                .help("Base MIDI channel N set on the dLive under Utility › Control › MIDI. N to N+4 are used.")
-                .disabled(model.connectionState.isActive)
-            Spacer()
+            Circle().fill(dotColour).frame(width: 10, height: 10)
+            settings.disabled(model.connectionState.isActive)
+            Spacer(minLength: 8)
             Text(statusText)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -76,16 +69,36 @@ struct ConnectionBar: View {
         .padding(.vertical, 8)
     }
 
-    private var statusDot: some View {
-        Circle()
-            .fill(dotColour)
-            .frame(width: 10, height: 10)
+    private var settings: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: $model.target) {
+                ForEach(DLive.Target.allCases) { Text($0.displayName).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 160)
+            TextField("IP address", text: $model.host)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 140)
+            Toggle("TLS", isOn: $model.useTLS)
+            if model.useTLS {
+                Stepper("Profile \(model.userProfile)", value: $model.userProfile, in: 0...31)
+                    .help("dLive user profile number (sent as 00–1F)")
+                SecureField("Password", text: $model.password)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 110)
+            }
+            Text("port \(String(model.port))").foregroundStyle(.secondary).monospacedDigit()
+            Stepper("MIDI \(model.baseChannel)–\(model.baseChannel + 4)",
+                    value: $model.baseChannel, in: 1...12)
+                .help("Base MIDI channel N from Utility / Control / MIDI. N to N+4 are used.")
+        }
     }
 
     private var dotColour: Color {
         switch model.connectionState {
         case .connected: return .green
-        case .connecting: return .yellow
+        case .connecting, .authenticating: return .yellow
         case .failed: return .red
         case .disconnected: return .gray
         }
@@ -95,38 +108,58 @@ struct ConnectionBar: View {
         switch model.connectionState {
         case .connected: return "Connected"
         case .connecting: return "Connecting…"
+        case .authenticating: return "Authenticating…"
         case .disconnected: return "Disconnected"
         case .failed(let msg): return msg
         }
     }
 }
 
-// MARK: - Toolbar above strips
+// MARK: - Toolbar above the page
 
-struct StripToolbar: View {
+struct PageToolbar: View {
     @EnvironmentObject var model: MixerModel
     @State private var scene = 1
+    @State private var cue = 0
 
     var body: some View {
-        HStack(spacing: 12) {
-            Text(model.selectedKind.displayName).font(.headline)
+        HStack(spacing: 10) {
+            Text(model.page.title).font(.headline)
             Button {
-                model.refresh(model.selectedKind)
+                model.refresh(model.page)
             } label: {
-                Label("Refresh from mixer", systemImage: "arrow.clockwise")
+                Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .disabled(model.connectionState != .connected)
+            .disabled(!model.isConnected)
             Spacer()
-            Text("Scene")
-            TextField("", value: $scene, format: .number.grouping(.never))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 56)
-            Stepper("", value: $scene, in: 1...500).labelsHidden()
-            Button("Recall") { model.send(.recallScene(scene)) }
-                .disabled(model.connectionState != .connected)
-            if let s = model.lastScene {
-                Text("Last: \(s)").foregroundStyle(.secondary).monospacedDigit()
+            if model.target == .mixRack {
+                Text("Scene")
+                TextField("", value: $scene, format: .number.grouping(.never))
+                    .textFieldStyle(.roundedBorder).frame(width: 52)
+                Stepper("", value: $scene, in: 1...500).labelsHidden()
+                Button("Recall") { model.send(.recallScene(scene)) }
+                    .disabled(!model.isConnected)
+            } else {
+                Text("Cue Recall Id")
+                TextField("", value: $cue, format: .number.grouping(.never))
+                    .textFieldStyle(.roundedBorder).frame(width: 56)
+                Stepper("", value: $cue, in: 0...1999).labelsHidden()
+                Button("Recall") { model.send(.recallCue(cue)) }
+                    .disabled(!model.isConnected)
             }
+            if let r = model.lastRecall {
+                Text("Last: \(r)").foregroundStyle(.secondary).monospacedDigit()
+            }
+            Menu("UFX") {
+                Menu("Global Key") {
+                    ForEach(UFXKey.allCases) { k in Button(k.name) { model.send(.ufxKey(k)) } }
+                }
+                Menu("Global Scale") {
+                    ForEach(UFXScale.allCases) { s in Button(s.name) { model.send(.ufxScale(s)) } }
+                }
+            }
+            .frame(width: 70)
+            .disabled(!model.isConnected)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

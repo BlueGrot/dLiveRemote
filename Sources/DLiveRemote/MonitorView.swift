@@ -15,7 +15,7 @@ struct MonitorView: View {
     }()
 
     private var entries: [LogEntry] {
-        showPartials ? model.log : model.log.filter { $0.text != "(partial)" }
+        showPartials ? model.log : model.log.filter { !$0.isPartial }
     }
 
     var body: some View {
@@ -64,7 +64,7 @@ struct MonitorView: View {
                     .onSubmit(sendRaw)
                     .border(rawError ? Color.red : Color.clear)
                 Button("Send", action: sendRaw)
-                    .disabled(model.connectionState != .connected)
+                    .disabled(!model.isConnected)
             }
             .padding(8)
         }

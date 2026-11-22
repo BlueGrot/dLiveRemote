@@ -72,6 +72,14 @@ struct ChannelStrip: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
+
+            if address.kind.isAssignable {
+                Text("MAIN")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(s.mainAssigned == true ? Color.green : Color.secondary.opacity(0.5))
+                    .onTapGesture { model.send(.mainAssign(address, !(s.mainAssigned ?? false))) }
+                    .help("Assignment to main mix (click to toggle)")
+            }
         }
         .padding(6)
         .frame(width: 70)
@@ -117,7 +125,17 @@ struct ChannelStrip: View {
             Button("Set to 0 dB") { model.setLevel(address, FaderLaw.unity) }
             Button("Set to -∞") { model.setLevel(address, 0) }
         }
-        if address.kind != .dca && address.kind != .muteGroup {
+        if address.kind.isAssignable {
+            Toggle("Assigned to Main", isOn: Binding(
+                get: { s.mainAssigned ?? false },
+                set: { model.send(.mainAssign(address, $0)) }
+            ))
+            if address.kind == .input {
+                Toggle("HPF On", isOn: Binding(
+                    get: { s.hpfOn ?? false },
+                    set: { model.send(.hpfOn(address, $0)) }
+                ))
+            }
             Menu("Assign DCA") {
                 ForEach(0..<24, id: \.self) { d in
                     Button("DCA \(d + 1)") { model.send(.dcaAssign(address, dca: d, assigned: true)) }
@@ -139,13 +157,7 @@ struct ChannelStrip: View {
             }
         }
         Divider()
-        Button("Get state from mixer") {
-            if address.kind.hasNameAndColour {
-                model.send(.getName(address)); model.send(.getColour(address))
-            }
-            if address.kind.hasFader { model.send(.getLevel(address)) }
-            model.send(.getMute(address))
-        }
+        Button("Get state from mixer") { model.requestState(address) }
     }
 }
 

@@ -31,9 +31,9 @@ struct DLiveRemoteApp: App {
                     .keyboardShortcut("k", modifiers: [.command, .shift])
                     .disabled(!model.connectionState.isActive)
                 Divider()
-                Button("Refresh Current Page") { model.refresh(model.selectedKind) }
+                Button("Refresh Current Page") { model.refresh(model.page) }
                     .keyboardShortcut("r", modifiers: [.command])
-                    .disabled(model.connectionState != .connected)
+                    .disabled(!model.isConnected)
             }
         }
     }
