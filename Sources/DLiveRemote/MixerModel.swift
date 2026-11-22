@@ -129,12 +129,14 @@ final class MixerModel: ObservableObject {
     }
     @Published var showInMenuBar: Bool = (UserDefaults.standard.object(forKey: "showInMenuBar") as? Bool) ?? true {
         didSet {
+            guard showInMenuBar != oldValue else { return }
             UserDefaults.standard.set(showInMenuBar, forKey: "showInMenuBar")
             if !showInMenuBar && hideDockIcon { hideDockIcon = false }
         }
     }
     @Published var hideDockIcon: Bool = UserDefaults.standard.bool(forKey: "hideDockIcon") {
         didSet {
+            guard hideDockIcon != oldValue else { return }
             UserDefaults.standard.set(hideDockIcon, forKey: "hideDockIcon")
             if hideDockIcon && !showInMenuBar { showInMenuBar = true }
             NSApp.setActivationPolicy(hideDockIcon ? .accessory : .regular)

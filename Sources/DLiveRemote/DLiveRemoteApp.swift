@@ -18,7 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct DLiveRemoteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @ObservedObject private var model = MixerModel.shared
+    /// Not observed here on purpose: observing the model at App level re-evaluates every
+    /// scene on each change, which loops with MenuBarExtra and crashes on recent macOS.
+    private let model = MixerModel.shared
+    /// Mirrors MixerModel.showInMenuBar (same UserDefaults key) so the scene updates
+    /// without the App observing the whole model.
+    @AppStorage("showInMenuBar") private var showInMenuBar = true
 
     var body: some Scene {
         WindowGroup("dLive Remote", id: "main") {
@@ -26,32 +31,48 @@ struct DLiveRemoteApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 1100, minHeight: 640)
         }
-        .commands {
-            CommandMenu("Mixer") {
-                Button("Connect") { model.connect() }
-                    .keyboardShortcut("k", modifiers: [.command])
-                    .disabled(model.connectionState.isActive)
-                Button("Disconnect") { model.disconnect() }
-                    .keyboardShortcut("k", modifiers: [.command, .shift])
-                    .disabled(!model.connectionState.isActive)
-                Divider()
-                Button("Refresh Current Page") { model.refresh(model.page) }
-                    .keyboardShortcut("r", modifiers: [.command])
-                    .disabled(!model.isConnected)
-            }
-        }
+        .commands { MixerCommands(model: model) }
 
         Settings {
             SettingsView()
                 .environmentObject(model)
         }
 
-        MenuBarExtra(isInserted: $model.showInMenuBar) {
+        MenuBarExtra(isInserted: Binding(
+            get: { showInMenuBar },
+            set: { if showInMenuBar != $0 { showInMenuBar = $0 } }
+        )) {
             MenuBarContent()
                 .environmentObject(model)
         } label: {
-            Image(systemName: model.isConnected ? "pianokeys.inverse" : "pianokeys")
+            MenuBarLabel(model: model)
         }
+    }
+}
+
+struct MixerCommands: Commands {
+    @ObservedObject var model: MixerModel
+
+    var body: some Commands {
+        CommandMenu("Mixer") {
+            Button("Connect") { model.connect() }
+                .keyboardShortcut("k", modifiers: [.command])
+                .disabled(model.connectionState.isActive)
+            Button("Disconnect") { model.disconnect() }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
+                .disabled(!model.connectionState.isActive)
+            Divider()
+            Button("Refresh Current Page") { model.refresh(model.page) }
+                .keyboardShortcut("r", modifiers: [.command])
+                .disabled(!model.isConnected)
+        }
+    }
+}
+
+struct MenuBarLabel: View {
+    @ObservedObject var model: MixerModel
+    var body: some View {
+        Image(systemName: model.isConnected ? "pianokeys.inverse" : "pianokeys")
     }
 }
 
