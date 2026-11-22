@@ -2,7 +2,21 @@
 
 A macOS app (SwiftUI, macOS 13+) that sends and receives MIDI over TCP/IP to an Allen & Heath dLive MixRack or Surface.
 
-## Features
+## Mixer → Mac MIDI bridge (main function)
+
+While the app is connected, it creates two virtual MIDI ports that any Mac app can use (Logic, Ableton, Reaper, QLab, MainStage and so on):
+
+| Port | In your other app, choose it as | Carries |
+|---|---|---|
+| **dLive** | a MIDI *input* | everything the mixer sends: MIDI strips, scene/cue recalls, mutes, faders, names and so on, forwarded as-is |
+| **dLive In** | a MIDI *output* | anything the app sends, which is passed on to the mixer |
+
+- The two directions can be switched on and off separately ("Mixer → Mac" and "Mac → Mixer").
+- If the connection drops, the app reconnects automatically every 3 seconds.
+- The app stops macOS from throttling it (App Nap) while connected.
+- Closing the window keeps the bridge running; quit with ⌘Q.
+- "Request state on connect" is off by default, because the mixer's replies would also flood your DAW's input.
+
 
 - Connects to a **MixRack** (TCP 51325, or TLS 51327) or a **Surface** (TCP 51328, or TLS 51329).
 - TLS logins send the dLive user profile (0–31) and password, then wait for the console's `AuthOK` reply.
