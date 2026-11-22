@@ -12,11 +12,26 @@ While the app is connected, it creates two virtual MIDI ports that any Mac app c
 | **dLive In** | a MIDI *output* | anything the app sends, which is passed on to the mixer |
 
 - The two directions can be switched on and off separately ("Mixer → Mac" and "Mac → Mixer").
+- MIDI is forwarded directly from the network to the virtual ports, so a busy window can't delay it.
 - If the connection drops, the app reconnects automatically every 3 seconds.
 - The app stops macOS from throttling it (App Nap) while connected.
-- Closing the window keeps the bridge running; quit with ⌘Q.
-- "Request state on connect" is off by default, because the mixer's replies would also flood your DAW's input.
+- Closing the window keeps the bridge running; the menu bar icon gives connect/disconnect and status.
 
+### Settings (⌘,)
+
+| Tab | Options |
+|---|---|
+| **General** | Connect on launch · Open at login · Menu bar icon · Hide Dock icon · Auto-reconnect · Request state on connect · Notifications when the connection is lost or restored · Alert when no MIDI arrives for N minutes |
+| **Routing** | Choose which types are forwarded: MIDI Strips & custom, scene/cue recalls, mutes, faders, assigns/EQ/preamp, SysEx, other control, system. Optionally publish each type on its own port (`dLive Strips`, `dLive Scenes`, `dLive Mutes`, …) |
+| **Channels** | Remap each of the 16 MIDI channels for messages sent to Mac apps |
+| **Translation** | **MSC:** MIDI Show Control GO with the scene/cue number on port `dLive MSC`, for QLab and similar. **OSC:** UDP messages on recall (template such as `/cue/{n}/start`), plus `/dlive/mute/…`, `/dlive/fader/…`, `/dlive/name/…` and `/dlive/midi`. **Mackie Control:** MIDI Strip faders, pan rotaries and Mute/Mix/PAFL keys are translated to MCU faders, V-Pots and Mute/Select/Solo, on `dLive Mackie 1-8` … `25-32` |
+
+Notes:
+- **Notifications** need the `.app` bundle. Under `swift run` the app beeps instead.
+- **Auto-connect with TLS** is skipped, because the password isn't saved.
+- **Mackie Control** is one-way: there's no motor-fader or LED feedback, and DAWs that require the MCU handshake (such as Logic) may not accept it.
+
+## Features
 
 - Connects to a **MixRack** (TCP 51325, or TLS 51327) or a **Surface** (TCP 51328, or TLS 51329).
 - TLS logins send the dLive user profile (0–31) and password, then wait for the console's `AuthOK` reply.
@@ -24,7 +39,7 @@ While the app is connected, it creates two virtual MIDI ports that any Mac app c
 - Right-click a strip to rename it, change its colour, assign it to main, turn the HPF on or off, set 0 dB or -∞, assign or unassign DCAs and mute groups, or fetch its state.
 - **Preamps** page for MixRack sockets 1–64: gain (+5 to +60 dB), pad and 48V.
 - Scene recall 1–500 on a MixRack; cue Recall Id 0–1999 on a Surface; UFX global key and scale.
-- **Refresh** (⌘R, and automatically after connecting or changing page) requests the current state of the visible page.
+- **Refresh** (⌘R) requests the current state of the visible page.
 - MIDI monitor with TX/RX hex and a decoded description of each message, plus a raw hex sender.
 - Handles MIDI running status, which the dLive uses.
 
