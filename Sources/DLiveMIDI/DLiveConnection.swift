@@ -27,8 +27,11 @@ public final class DLiveConnection {
     }
 
     public var onStateChange: ((State) -> Void)?
-    /// Raw MIDI bytes as received, in order (the "AuthOK" reply is stripped).
+    /// Raw MIDI bytes as received, in order (the "AuthOK" reply is stripped). Main queue.
     public var onBytes: (([UInt8]) -> Void)?
+    /// Same bytes, called synchronously on the connection's own queue before `onBytes`.
+    /// Use for low-latency forwarding that must not wait for the main thread.
+    public var onBytesOnConnectionQueue: (([UInt8]) -> Void)?
 
     // Everything below is only touched on `queue`.
     private var connection: NWConnection?
@@ -158,7 +161,7 @@ public final class DLiveConnection {
 
     private func handle(_ bytes: [UInt8]) {
         guard var buf = authBuffer else {
-            DispatchQueue.main.async { self.onBytes?(bytes) }
+            deliver(bytes)
             return
         }
         buf += bytes
@@ -178,9 +181,12 @@ public final class DLiveConnection {
         authBuffer = nil
         setState(.connected)
         let rest = Array(buf.dropFirst(ok.count))
-        if !rest.isEmpty {
-            DispatchQueue.main.async { self.onBytes?(rest) }
-        }
+        if !rest.isEmpty { deliver(rest) }
+    }
+
+    private func deliver(_ bytes: [UInt8]) {
+        onBytesOnConnectionQueue?(bytes)
+        DispatchQueue.main.async { self.onBytes?(bytes) }
     }
 }
 #endif

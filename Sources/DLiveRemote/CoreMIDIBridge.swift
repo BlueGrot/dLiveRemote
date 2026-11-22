@@ -2,45 +2,70 @@ import Foundation
 import CoreMIDI
 import DLiveMIDI
 
-/// Virtual CoreMIDI ports that other Mac apps (DAWs, QLab, MainStage…) can use:
-///  - a SOURCE named "<name>"        : everything the mixer sends appears here
-///  - a DESTINATION named "<name> In": anything apps send here goes to the mixer
+/// Virtual CoreMIDI ports that other Mac apps (DAWs, QLab, MainStage…) can use.
+///  - one or more SOURCES (mixer → apps), created/removed by `setSources`
+///  - a DESTINATION "<name> In" (apps → mixer)
+/// `publish` is thread-safe and may be called from the network queue.
 final class CoreMIDIBridge {
     private var client = MIDIClientRef()
-    private var source = MIDIEndpointRef()
     private var destination = MIDIEndpointRef()
-    private var decoder = UMP.Decoder()
+    private var sources: [BridgePort: MIDIEndpointRef] = [:]
     private let lock = NSLock()
+    private var decoder = UMP.Decoder()
+    let baseName: String
 
     /// Called on the main queue with complete MIDI 1.0 messages received from Mac apps.
     var onMessageFromApps: (([UInt8]) -> Void)?
     private(set) var setupError: String?
 
     init(name: String) {
+        baseName = name
         var status = MIDIClientCreateWithBlock(name as CFString, &client) { _ in }
         guard status == noErr else { setupError = "MIDI client error \(status)"; return }
-
-        status = MIDISourceCreateWithProtocol(client, name as CFString, ._1_0, &source)
-        guard status == noErr else { setupError = "MIDI source error \(status)"; return }
 
         status = MIDIDestinationCreateWithProtocol(client, "\(name) In" as CFString, ._1_0, &destination) {
             [weak self] eventList, _ in
             self?.receive(eventList)
         }
-        guard status == noErr else { setupError = "MIDI destination error \(status)"; return }
+        if status != noErr { setupError = "MIDI destination error \(status)" }
     }
 
     deinit {
+        for (_, s) in sources { MIDIEndpointDispose(s) }
         if destination != 0 { MIDIEndpointDispose(destination) }
-        if source != 0 { MIDIEndpointDispose(source) }
         if client != 0 { MIDIClientDispose(client) }
     }
 
-    /// Publish one message from the mixer on the virtual source.
-    func publish(_ msg: MIDIMessage) {
-        guard source != 0 else { return }
+    /// Create / remove virtual sources so exactly `wanted` exist (port → display name).
+    func setSources(_ wanted: [BridgePort: String]) {
+        guard client != 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        for (port, ref) in sources where wanted[port] == nil {
+            MIDIEndpointDispose(ref)
+            sources[port] = nil
+        }
+        for (port, name) in wanted where sources[port] == nil {
+            var ref = MIDIEndpointRef()
+            let status = MIDISourceCreateWithProtocol(client, name as CFString, ._1_0, &ref)
+            if status == noErr {
+                sources[port] = ref
+            } else {
+                setupError = "Could not create MIDI port \"\(name)\" (\(status))"
+            }
+        }
+    }
+
+    /// Publish one message on a virtual source. Returns false if that port doesn't exist.
+    @discardableResult
+    func publish(_ msg: MIDIMessage, on port: BridgePort) -> Bool {
+        lock.lock()
+        let ref = sources[port]
+        lock.unlock()
+        guard let ref else { return false }
+
         let words = UMP.words(for: msg)
-        guard !words.isEmpty else { return }
+        guard !words.isEmpty else { return false }
 
         let listSize = MemoryLayout<MIDIEventList>.size + words.count * MemoryLayout<UInt32>.size * 2 + 64
         let raw = UnsafeMutableRawPointer.allocate(byteCount: listSize, alignment: MemoryLayout<MIDIEventList>.alignment)
@@ -56,7 +81,8 @@ final class CoreMIDIBridge {
             }
             i += n
         }
-        MIDIReceivedEventList(source, list)
+        MIDIReceivedEventList(ref, list)
+        return true
     }
 
     private func receive(_ eventList: UnsafePointer<MIDIEventList>) {

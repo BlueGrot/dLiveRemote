@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import AppKit
+import ServiceManagement
 import DLiveMIDI
 
 struct StripState: Equatable {
@@ -52,7 +54,7 @@ final class MixerModel: ObservableObject {
         didSet { UserDefaults.standard.set(host, forKey: "host") }
     }
     @Published var target: DLive.Target = DLive.Target(rawValue: UserDefaults.standard.string(forKey: "target") ?? "") ?? .mixRack {
-        didSet { UserDefaults.standard.set(target.rawValue, forKey: "target") }
+        didSet { UserDefaults.standard.set(target.rawValue, forKey: "target"); pushBridgeSettings() }
     }
     @Published var useTLS: Bool = UserDefaults.standard.bool(forKey: "useTLS") {
         didSet { UserDefaults.standard.set(useTLS, forKey: "useTLS") }
@@ -67,6 +69,7 @@ final class MixerModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(baseChannel, forKey: "baseChannel")
             decoder.base = baseByte
+            pushBridgeSettings()
         }
     }
 
@@ -80,7 +83,7 @@ final class MixerModel: ObservableObject {
     }
     /// Forward everything received from the mixer to the virtual CoreMIDI source.
     @Published var forwardToMac: Bool = (UserDefaults.standard.object(forKey: "forwardToMac") as? Bool) ?? true {
-        didSet { UserDefaults.standard.set(forwardToMac, forKey: "forwardToMac") }
+        didSet { UserDefaults.standard.set(forwardToMac, forKey: "forwardToMac"); pushBridgeSettings() }
     }
     /// Pass messages from Mac apps (virtual destination) to the mixer.
     @Published var forwardFromMac: Bool = (UserDefaults.standard.object(forKey: "forwardFromMac") as? Bool) ?? true {
@@ -92,10 +95,82 @@ final class MixerModel: ObservableObject {
     // MARK: Mac MIDI bridge
 
     static let midiPortName = "dLive"
-    let bridge = CoreMIDIBridge(name: MixerModel.midiPortName)
+    /// Filtering, per-type ports, channel map, MSC / OSC / Mackie translation.
+    @Published var bridgeSettings: BridgeSettings = MixerModel.loadBridgeSettings() {
+        didSet {
+            if let data = try? JSONEncoder().encode(bridgeSettings) {
+                UserDefaults.standard.set(data, forKey: "bridgeSettings")
+            }
+            pushBridgeSettings()
+        }
+    }
+    let engine: BridgeEngine
+    var bridge: CoreMIDIBridge { engine.midi }
     @Published private(set) var forwardedToMac = 0
     @Published private(set) var receivedFromMac = 0
     @Published private(set) var lastRxTime: Date?
+
+    private static func loadBridgeSettings() -> BridgeSettings {
+        guard let data = UserDefaults.standard.data(forKey: "bridgeSettings"),
+              let s = try? JSONDecoder().decode(BridgeSettings.self, from: data) else { return BridgeSettings() }
+        return s
+    }
+
+    private func pushBridgeSettings() {
+        var s = bridgeSettings
+        s.target = target
+        engine.update(settings: s, base: baseByte, enabled: forwardToMac)
+    }
+
+    // MARK: App behaviour & alerts
+
+    @Published var autoConnectOnLaunch: Bool = UserDefaults.standard.bool(forKey: "autoConnectOnLaunch") {
+        didSet { UserDefaults.standard.set(autoConnectOnLaunch, forKey: "autoConnectOnLaunch") }
+    }
+    @Published var showInMenuBar: Bool = (UserDefaults.standard.object(forKey: "showInMenuBar") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(showInMenuBar, forKey: "showInMenuBar")
+            if !showInMenuBar && hideDockIcon { hideDockIcon = false }
+        }
+    }
+    @Published var hideDockIcon: Bool = UserDefaults.standard.bool(forKey: "hideDockIcon") {
+        didSet {
+            UserDefaults.standard.set(hideDockIcon, forKey: "hideDockIcon")
+            if hideDockIcon && !showInMenuBar { showInMenuBar = true }
+            NSApp.setActivationPolicy(hideDockIcon ? .accessory : .regular)
+        }
+    }
+    @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var launchAtLoginError: String?
+
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginError = error.localizedDescription
+        }
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    @Published var notifyOnConnectionChange: Bool = (UserDefaults.standard.object(forKey: "notifyOnConnectionChange") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(notifyOnConnectionChange, forKey: "notifyOnConnectionChange")
+            if notifyOnConnectionChange { Notifier.requestAuthorization() }
+        }
+    }
+    /// Alert when no MIDI has arrived from the mixer for this many minutes (0 = off).
+    @Published var silenceAlertMinutes: Int = UserDefaults.standard.integer(forKey: "silenceAlertMinutes") {
+        didSet {
+            UserDefaults.standard.set(silenceAlertMinutes, forKey: "silenceAlertMinutes")
+            if silenceAlertMinutes > 0 { Notifier.requestAuthorization() }
+        }
+    }
+    private var connectedSince: Date?
+    private var hasBeenConnected = false
+    private var lostAlerted = false
+    private var silenceAlerted = false
+    private var statsTimer: Timer?
 
     // MARK: Mixer state
 
@@ -120,7 +195,10 @@ final class MixerModel: ObservableObject {
 
     init() {
         decoder = DLiveDecoder(base: 0)
+        engine = BridgeEngine(portName: MixerModel.midiPortName, settings: BridgeSettings(), base: 0)
         decoder.base = baseByte
+        pushBridgeSettings()
+        connection.onBytesOnConnectionQueue = MixerModel.forwarder(engine)
         connection.onStateChange = { [weak self] s in
             self?.connectionStateChanged(s)
         }
@@ -130,12 +208,50 @@ final class MixerModel: ObservableObject {
         bridge.onMessageFromApps = { [weak self] bytes in
             self?.fromMacApp(bytes)
         }
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        if notifyOnConnectionChange || silenceAlertMinutes > 0 { Notifier.requestAuthorization() }
+        if autoConnectOnLaunch && !host.isEmpty && !(useTLS && password.isEmpty) {
+            DispatchQueue.main.async { [weak self] in self?.connect() }
+        }
+    }
+
+    /// Built outside the main actor: runs on the network queue.
+    private nonisolated static func forwarder(_ engine: BridgeEngine) -> ([UInt8]) -> Void {
+        { bytes in engine.process(bytes) }
+    }
+
+    private func tick() {
+        let stats = engine.stats
+        if forwardedToMac != stats.forwarded { forwardedToMac = stats.forwarded }
+
+        // Silence watchdog
+        guard silenceAlertMinutes > 0, isConnected, let since = connectedSince else { return }
+        let last = max(stats.lastRx ?? since, since)
+        let silentFor = Date().timeIntervalSince(last)
+        if silentFor > Double(silenceAlertMinutes) * 60 {
+            if !silenceAlerted {
+                silenceAlerted = true
+                Notifier.post("No MIDI from dLive",
+                              "Nothing received for \(silenceAlertMinutes) min. The connection is still open.")
+            }
+        } else {
+            silenceAlerted = false
+        }
     }
 
     private func connectionStateChanged(_ s: DLiveConnection.State) {
         connectionState = s
         switch s {
         case .connected:
+            connectedSince = Date()
+            silenceAlerted = false
+            if lostAlerted && notifyOnConnectionChange {
+                Notifier.post("dLive reconnected", "\(target.displayName) \(host)")
+            }
+            lostAlerted = false
+            hasBeenConnected = true
             // Keep macOS from App-Napping the bridge while the window is hidden.
             if activity == nil {
                 activity = ProcessInfo.processInfo.beginActivity(
@@ -143,11 +259,20 @@ final class MixerModel: ObservableObject {
                     reason: "Bridging dLive MIDI")
             }
             if refreshOnConnect { refresh(page) }
-        case .failed:
+        case .failed(let msg):
             endActivity()
+            connectedSince = nil
+            if hasBeenConnected && wantsConnection && !lostAlerted {
+                lostAlerted = true
+                if notifyOnConnectionChange {
+                    Notifier.post("dLive connection lost",
+                                  autoReconnect ? "\(msg). Reconnecting…" : msg)
+                }
+            }
             scheduleReconnect()
         case .disconnected:
             endActivity()
+            connectedSince = nil
         default:
             break
         }
@@ -173,11 +298,14 @@ final class MixerModel: ObservableObject {
 
     func connect() {
         wantsConnection = true
+        hasBeenConnected = false
+        lostAlerted = false
         openConnection()
     }
 
     private func openConnection() {
         reconnectWork?.cancel()
+        engine.reset()
         parser = MIDIStreamParser()
         decoder = DLiveDecoder(base: baseByte)
         let creds = useTLS
@@ -273,11 +401,9 @@ final class MixerModel: ObservableObject {
 
     private func receive(_ bytes: [UInt8]) {
         lastRxTime = Date()
+        // Forwarding to Mac apps already happened on the network queue (BridgeEngine);
+        // this path only updates the UI and the monitor.
         for msg in parser.feed(bytes) {
-            if forwardToMac {
-                bridge.publish(msg)
-                forwardedToMac += 1
-            }
             if case .system = msg { continue }
             let event = decoder.decode(msg)
             appendLog(.rx, msg.bytes, event?.description ?? "(NRPN part / note-off)", partial: event == nil)

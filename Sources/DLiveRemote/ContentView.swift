@@ -143,9 +143,11 @@ struct BridgeBar: View {
             Text("→Mac \(model.forwardedToMac)  ←Mac \(model.receivedFromMac)")
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-            Toggle("Auto-reconnect", isOn: $model.autoReconnect)
-            Toggle("Request state on connect", isOn: $model.refreshOnConnect)
-                .help("Ask the mixer for all names/levels/mutes after connecting. The replies are also forwarded to Mac apps.")
+            if #available(macOS 14.0, *) {
+                SettingsLink { Label("Routing & translation…", systemImage: "slider.horizontal.3") }
+            } else {
+                Text("Routing & translation: ⌘,").foregroundStyle(.secondary)
+            }
         }
         .toggleStyle(.checkbox)
         .font(.callout)

@@ -1,14 +1,16 @@
 import SwiftUI
 import AppKit
+import DLiveMIDI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Needed when launched via `swift run` (no .app bundle) so the window comes to front.
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // .regular is also needed when launched via `swift run` (no .app bundle).
+        let hideDock = UserDefaults.standard.bool(forKey: "hideDockIcon")
+        NSApp.setActivationPolicy(hideDock ? .accessory : .regular)
+        if !hideDock { NSApp.activate(ignoringOtherApps: true) }
     }
 
-    /// Keep bridging MIDI when the window is closed; quit with ⌘Q.
+    /// Keep bridging MIDI when the window is closed; quit with ⌘Q or from the menu bar.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
@@ -18,10 +20,10 @@ struct DLiveRemoteApp: App {
     @StateObject private var model = MixerModel()
 
     var body: some Scene {
-        WindowGroup("dLive Remote") {
+        WindowGroup("dLive Remote", id: "main") {
             ContentView()
                 .environmentObject(model)
-                .frame(minWidth: 980, minHeight: 640)
+                .frame(minWidth: 1100, minHeight: 640)
         }
         .commands {
             CommandMenu("Mixer") {
@@ -36,6 +38,57 @@ struct DLiveRemoteApp: App {
                     .keyboardShortcut("r", modifiers: [.command])
                     .disabled(!model.isConnected)
             }
+        }
+
+        Settings {
+            SettingsView()
+                .environmentObject(model)
+        }
+
+        MenuBarExtra(isInserted: $model.showInMenuBar) {
+            MenuBarContent()
+                .environmentObject(model)
+        } label: {
+            Image(systemName: model.isConnected ? "pianokeys.inverse" : "pianokeys")
+        }
+    }
+}
+
+struct MenuBarContent: View {
+    @EnvironmentObject var model: MixerModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Text(statusLine)
+        Text("→ Mac: \(model.forwardedToMac) messages")
+        Divider()
+        if model.connectionState.isActive || model.isReconnecting {
+            Button("Disconnect") { model.disconnect() }
+        } else {
+            Button("Connect to \(model.host)") { model.connect() }
+        }
+        Toggle("Mixer → Mac", isOn: $model.forwardToMac)
+        Toggle("Mac → Mixer", isOn: $model.forwardFromMac)
+        Divider()
+        Button("Open dLive Remote") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if #available(macOS 14.0, *) {
+            SettingsLink { Text("Settings…") }
+        }
+        Divider()
+        Button("Quit") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+
+    private var statusLine: String {
+        switch model.connectionState {
+        case .connected: return "Connected to \(model.target.displayName) \(model.host)"
+        case .connecting: return "Connecting…"
+        case .authenticating: return "Authenticating…"
+        case .disconnected: return "Disconnected"
+        case .failed(let m): return model.isReconnecting ? "Reconnecting… (\(m))" : m
         }
     }
 }
